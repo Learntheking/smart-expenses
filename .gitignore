@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.smart-expenses/
+expenses_export.json
+expenses_export.csv
