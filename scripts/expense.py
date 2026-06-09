@@ -344,6 +344,148 @@ def cmd_search(args):
         print(f"#{r['id']:<4} {r['date']}  ¥{r['amount']:<8.2f} {r['category']:<10} {r['description']}")
 
 
+# ── Natural language parsing (standalone mode, no Claude needed) ──────────────
+
+CATEGORY_KEYWORDS = [
+    ("住房房租", "房租|房贷|物业|水电费|燃气|取暖|维修"),
+    ("交通出行", "打车|滴滴|地铁|公交|高铁|火车票|机票|加油|停车|共享单车|出租车|网约车|顺风车|骑行|地铁卡"),
+    ("日常用品", "日用品|洗漱|纸巾|洗发水|沐浴露|洗衣液|买菜|超市|牙膏|毛巾|垃圾袋|洗衣|清洁"),
+    ("餐饮饮食", "外卖|餐厅|食堂|奶茶|咖啡|饮料|早餐|午餐|晚餐|晚饭|早饭|午饭|烧烤|火锅|零食|水果|聚餐|请客|包子|饺子|面条|汉堡|披萨|炸鸡|面包"),
+    ("购物消费", "买了|衣服|鞋子|包包|电子|数码|淘宝|京东|网购|商场|化妆品|护肤品|卫衣|裤子|裙子|帽子|袜子|手机|电脑|耳机|家电|家具"),
+    ("休闲娱乐", "电影|KTV|唱歌|游戏|旅游|景点|门票|演唱会|酒吧|剧本杀|密室|健身|游泳|按摩|聚会|ktv|游乐"),
+    ("医疗健康", "挂号|看病|药|医院|体检|牙科|门诊|急诊|住院|检查|买药|诊所"),
+    ("教育学习", "书|课程|培训|考试|报名|学费|文具|网课|电子书|买书|教材"),
+    ("通讯网络", "话费|流量|宽带|网费|VPN|电话费|充话费|充值"),
+]
+
+DATE_PATTERNS = [
+    (r"今天", 0),
+    (r"昨天", 1),
+    (r"前天", 2),
+    (r"大前天", 3),
+    (r"上周一", lambda: _day_offset_last_week(0)),
+    (r"上周二", lambda: _day_offset_last_week(1)),
+    (r"上周三", lambda: _day_offset_last_week(2)),
+    (r"上周四", lambda: _day_offset_last_week(3)),
+    (r"上周五", lambda: _day_offset_last_week(4)),
+    (r"上周六", lambda: _day_offset_last_week(5)),
+    (r"上周日|上周末", lambda: _day_offset_last_week(6)),
+    (r"前天", 2),
+    (r"(\d+)天前", lambda m: int(m.group(1))),
+]
+
+def _day_offset_last_week(weekday):
+    """Days from today to the given weekday last week."""
+    today = date.today()
+    days_since = today.weekday() - weekday
+    if days_since < 0:
+        days_since += 7
+    return days_since + 7
+
+def parse_date(text):
+    """Extract date from natural language text. Returns (date_iso, cleaned_text)."""
+    import re
+    today = date.today()
+
+    for pattern, offset in DATE_PATTERNS:
+        m = re.search(pattern, text)
+        if m:
+            if callable(offset):
+                days = offset(m) if m.groups() else offset()
+            else:
+                days = offset
+            result_date = today - timedelta(days=days)
+            text = re.sub(pattern, "", text).strip()
+            return result_date.isoformat(), text
+
+    # Check for explicit YYYY-MM-DD or MM-DD
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", text)
+    if m:
+        text = text.replace(m.group(1), "").strip()
+        return m.group(1), text
+    m = re.search(r"(\d{1,2})月(\d{1,2})[号日]", text)
+    if m:
+        month, day = int(m.group(1)), int(m.group(2))
+        text = re.sub(r"\d{1,2}月\d{1,2}[号日]", "", text).strip()
+        return f"{today.year}-{month:02d}-{day:02d}", text
+
+    return today.isoformat(), text
+
+def parse_amount(text):
+    """Extract monetary amount from natural language text. Returns (amount, cleaned_text)."""
+    import re
+    # ¥123.45, 123.45元, 123块, 123.5块, $50
+    m = re.search(r"[¥$]?\s*(\d+(?:\.\d{1,2})?)\s*(?:元|块|刀|美元|美金)?", text)
+    if m:
+        amount = float(m.group(1))
+        text = re.sub(r"[¥$]?\s*\d+(?:\.\d{1,2})?\s*(?:元|块|刀|美元|美金)?", "", text, count=1).strip()
+        return amount, text
+    return None, text
+
+def parse_category(text):
+    """Infer expense category from description text."""
+    import re
+    for cat, pattern in CATEGORY_KEYWORDS:
+        if re.search(pattern, text):
+            return cat
+    return "其他支出"
+
+def cmd_nl(args):
+    """Natural language expense entry: python expense.py 中午外卖35块"""
+    ensure_data_dir()
+    import re
+
+    raw = " ".join(args).strip()
+    if not raw:
+        print("Usage: python expense.py <自然语言描述>")
+        print('Example: python expense.py 中午外卖35块')
+        sys.exit(1)
+
+    text = raw
+
+    # Extract date
+    expense_date, text = parse_date(text)
+
+    # Extract amount
+    amount, text = parse_amount(text)
+    if amount is None:
+        print(f"❌ 未能识别金额，请在描述中包含数字金额（如 35块、100元）")
+        print(f"   输入: {raw}")
+        sys.exit(1)
+
+    # Infer category
+    category = parse_category(text)
+
+    # Clean description
+    import re
+    desc = text.strip()
+    # Remove filler words
+    desc = re.sub(r"(花了|用了|买了|交了|付了|消费|花了|买了)", "", desc)
+    # Remove leading measure words
+    desc = re.sub(r"^[个件双支本张台辆杯碗盘份次趟]", "", desc)
+    desc = desc.strip().lstrip("，,。的 ").strip()
+    if not desc:
+        desc = re.sub(r"[¥$]?\s*\d+(?:\.\d+)?\s*(?:元|块|刀|美元|美金)?", "", raw).strip()
+        desc = re.sub(r"(花了|用了|买了|交了|付了)", "", desc).strip()
+    if len(desc) > 30:
+        desc = desc[:30]
+
+    # Save
+    rows = read_expenses()
+    new_row = {
+        "id": next_id(rows),
+        "date": expense_date,
+        "amount": round(amount, 2),
+        "category": category,
+        "description": desc,
+        "notes": "",
+    }
+    rows.append(new_row)
+    write_expenses(rows)
+
+    print(f"✓ #{new_row['id']} | {new_row['description']} | ¥{new_row['amount']:.2f} | {new_row['category']} | {new_row['date']}")
+
+
 COMMANDS = {
     "add": cmd_add,
     "list": cmd_list,
@@ -353,6 +495,7 @@ COMMANDS = {
     "export": cmd_export,
     "summary": cmd_summary,
     "search": cmd_search,
+    "nl": cmd_nl,
 }
 
 
@@ -361,22 +504,21 @@ def main():
         print("Smart Expenses — Natural language expense tracking")
         print(f"Data: {DATA_FILE}")
         print()
-        print("Commands: add | list | report | delete | categories | export | summary | search")
-        print("See SKILL.md for usage with Claude Code.")
+        print("Commands: add | list | report | delete | categories | export | summary | search | nl")
         print()
-        print("Quick examples:")
-        print('  python expense.py add --amount 35 --category 餐饮饮食 --desc "外卖"')
-        print("  python expense.py list 10")
+        print("Quick examples (standalone, no Claude needed):")
+        print('  python expense.py 中午外卖35块')
+        print('  python expense.py 昨天打车18元')
+        print('  python expense.py list 10')
         print("  python expense.py report")
         print("  python expense.py summary")
         return
 
-    cmd = sys.argv[1]
-    if cmd in COMMANDS:
-        COMMANDS[cmd](sys.argv[2:])
+    # If first arg isn't a known command, treat as natural language
+    if sys.argv[1] in COMMANDS:
+        COMMANDS[sys.argv[1]](sys.argv[2:])
     else:
-        print(f"Unknown command: {cmd}")
-        print(f"Available: {', '.join(COMMANDS.keys())}")
+        cmd_nl(sys.argv[1:])
 
 
 if __name__ == "__main__":

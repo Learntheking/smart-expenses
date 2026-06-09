@@ -12,6 +12,14 @@ allowed-tools: Bash(python3 *) Read
 python3 ${CLAUDE_SKILL_DIR}/scripts/expense.py <command> [args]
 ```
 
+> 💡 **不用 Claude 也能用**：此脚本支持独立运行，直接在终端输入自然语言即可记账：
+> ```
+> python expense.py 中午外卖35块
+> python expense.py 昨天打车18元
+> python expense.py list
+> python expense.py report
+> ```
+
 ## 核心工作流程
 
 ### 1. 解析自然语言记账
